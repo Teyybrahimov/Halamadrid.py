@@ -1,0 +1,107 @@
+import re
+import csv
+import json
+from collections import defaultdict
+from bs4 import BeautifulSoup
+from pathlib import Path
+
+# Fayl yollarını dəyişmək üçün dəyişənlər
+log_file_path = "access_log.txt"
+threat_feed_path = "threat_feed.html"
+url_status_report_path = "url_status_report.txt"
+malware_candidates_path = "malware_candidates.csv"
+alert_json_path = "alert.json"
+summary_report_json_path = "summary_report.json"
+
+# Fayl yaradılmırsa, boş fayl yaradılması üçün funksiyalar
+def ensure_file_exists(file_path):
+    path = Path(file_path)
+    if not path.exists():
+        path.touch()
+
+# Xətaların idarə olunması üçün fayl yoxlama funksiyası
+def check_file_exists(file_path):
+    path = Path(file_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Fayl tapılmadı: {file_path}")
+
+try:
+    # Əsas faylların mövcudluğunu təmin et
+    ensure_file_exists(log_file_path)
+    ensure_file_exists(threat_feed_path)
+
+    # Faylların mövcudluğunu yoxla
+    check_file_exists(log_file_path)
+    check_file_exists(threat_feed_path)
+
+    # 1. Sistem Log Analizi
+    # a. URL-lərin və HTTP status kodlarının çıxarılması
+    url_status_dict = defaultdict(list)
+    log_pattern = r'"(?:GET|POST|PUT|DELETE|HEAD|OPTIONS) (\S+) HTTP/\d\.\d" (\d{3})'
+
+    with open(log_file_path, 'r') as file:
+        for line in file:
+            match = re.search(log_pattern, line)
+            if match:
+                url, status = match.groups()
+                url_status_dict[status].append(url)
+
+    # b. 404 status kodu ilə URL-lərin və saylarının hesablanması
+    error_404_urls = defaultdict(int)
+    for url in url_status_dict.get("404", []):
+        error_404_urls[url] += 1
+
+    # 2. Fayl manipulyasiyası
+    # a. URL-lər və status kodları url_status_report.txt faylına yazılır
+    with open(url_status_report_path, 'w') as file:
+        for status, urls in url_status_dict.items():
+            for url in urls:
+                file.write(f"{url} {status}\n")
+
+    # b. 404 statuslu URL-ləri və saylarını CSV faylına yazmaq
+    with open(malware_candidates_path, 'w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(["URL", "Count"])
+        for url, count in error_404_urls.items():
+            writer.writerow([url, count])
+
+    # 3. Veb Scraping
+    # a. Qara siyahıya alınmış domenləri çıxarmaq
+    with open(threat_feed_path, 'r') as file:
+        soup = BeautifulSoup(file, 'html.parser')
+
+    blacklisted_domains = [li.text for li in soup.find_all('li')]
+
+    # b. Jurnal faylındakı URL-ləri qara siyahı ilə müqayisə etmək
+    blacklisted_urls = [
+        url for url, status in [(url, status) for status, urls in url_status_dict.items() for url in urls]
+        if any(domain in url for domain in blacklisted_domains)
+    ]
+
+    # 4. JSON məlumatların idarə edilməsi
+    # a. Uyğun URL-ləri alert.json faylına yazmaq
+    alert_data = [
+        {"url": url, "status": "blacklisted", "count": error_404_urls.get(url, 0)}
+        for url in blacklisted_urls
+    ]
+
+    with open(alert_json_path, 'w') as jsonfile:
+        json.dump(alert_data, jsonfile, indent=4)
+
+    # b. Təhlilin nəticələrini summary_report.json faylına yazmaq
+    summary_data = {
+        "total_urls": sum(len(urls) for urls in url_status_dict.values()),
+        "total_404_errors": sum(error_404_urls.values()),
+        "blacklisted_urls_count": len(blacklisted_urls),
+        "blacklisted_domains": blacklisted_domains,
+    }
+
+    with open(summary_report_json_path, 'w') as jsonfile:
+        json.dump(summary_data, jsonfile, indent=4)
+
+    print("Tapşırıq uğurla yerinə yetirildi.")
+
+except FileNotFoundError as e:
+    print(f"Xəta: {e}")
+except Exception as e:
+    print(f"Gözlənilməz xəta baş verdi: {e}")
